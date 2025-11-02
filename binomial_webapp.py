@@ -256,6 +256,7 @@ def compute_from_form(f):
             f"K_pay={K_pay}, K_trig={K_trig}",
             f"Price: {V_tree[0][0]:.6f}",
         ]
+        result = result + "\n\nFormulas used:\n" + formula
         return (
             {"price": V_tree[0][0], "S_tree": S_tree},
             df,

@@ -15,10 +15,6 @@ def stdnorm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def stdnorm_pdf(x):
-    return (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * x * x)
-
-
 def payoff(S, K, option):
     return max(S - K, 0.0) if option == "call" else max(K - S, 0.0)
 
@@ -37,6 +33,7 @@ def crr_ud(sigma, dt):
 
 
 def risk_neutral_p(r, q, dt, u, d):
+    # p = (e^{(r - q)Δt} - d)/(u - d)
     a = math.exp((r - q) * dt)
     return (a - d) / (u - d)
 
@@ -68,7 +65,6 @@ def option_tree(S_tree, K, r, q, dt, u, d, option, exercise):
 
 
 def option_tree_gap(S_tree, K_pay, K_trig, r, q, dt, u, d, option):
-    # European gap at maturity (no early exercise)
     N = len(S_tree) - 1
     V = [[0.0] * (i + 1) for i in range(N + 1)]
     for j, S in enumerate(S_tree[-1]):
@@ -82,24 +78,21 @@ def option_tree_gap(S_tree, K_pay, K_trig, r, q, dt, u, d, option):
 
 
 # ---------- Barrier (European) with discrete monitoring ----------
-# Uses "up/down" hit thresholds in terms of # of ups/downs, so each node is either fully alive or fully knocked-out.
 
 
 def _ups_to_hit(S0, H, u):
     if u <= 1.0:
-        raise ValueError("u must be > 1 for up-barrier calculations")
+        raise ValueError("u must be > 1 for up-barrier")
     if S0 >= H:
         return 0
-    # ceil(log_u(H/S0))
     return int(math.ceil(math.log(H / S0, u)))
 
 
 def _downs_to_hit(S0, H, d):
     if d >= 1.0:
-        raise ValueError("d must be < 1 for down-barrier calculations")
+        raise ValueError("d must be < 1 for down-barrier")
     if S0 <= H:
         return 0
-    # ceil(log_d(H/S0)) with d<1
     return int(math.ceil(math.log(H / S0, d)))
 
 
@@ -112,13 +105,8 @@ def barrier_out_tree(S0, K, r, q, T, N, u, d, option, barrier_type, H):
 
     if barrier_type == "up-and-out":
         k = _ups_to_hit(S0, H, u)
-        # terminal
         for j, St in enumerate(S[-1]):
-            if j >= k:  # barrier touched sometime
-                V[-1][j] = 0.0
-            else:
-                V[-1][j] = payoff(St, K, option)
-        # backward
+            V[-1][j] = 0.0 if j >= k else payoff(St, K, option)
         for i in range(N - 1, -1, -1):
             for j in range(i + 1):
                 if j >= k:
@@ -128,13 +116,9 @@ def barrier_out_tree(S0, K, r, q, T, N, u, d, option, barrier_type, H):
 
     elif barrier_type == "down-and-out":
         m = _downs_to_hit(S0, H, d)
-        # At time i with j ups => downs = i-j
         for j, St in enumerate(S[-1]):
             downs = N - j
-            if downs >= m:
-                V[-1][j] = 0.0
-            else:
-                V[-1][j] = payoff(St, K, option)
+            V[-1][j] = 0.0 if downs >= m else payoff(St, K, option)
         for i in range(N - 1, -1, -1):
             for j in range(i + 1):
                 downs = i - j
@@ -144,29 +128,37 @@ def barrier_out_tree(S0, K, r, q, T, N, u, d, option, barrier_type, H):
                     V[i][j] = disc * (p * V[i + 1][j + 1] + (1 - p) * V[i + 1][j])
     else:
         raise ValueError("barrier_out_tree only handles up-and-out or down-and-out")
+
     return S, V
 
 
 def barrier_price_euro(S0, K, r, q, T, N, u, d, option, barrier_type, H):
-    # For "in" types, use in-out parity: IN = vanilla - OUT (discrete-monitoring consistent with our OUT)
     dt = T / N
     if barrier_type in ("up-and-out", "down-and-out"):
         S_tree, V_out = barrier_out_tree(
             S0, K, r, q, T, N, u, d, option, barrier_type, H
         )
         price = V_out[0][0]
-        return price, S_tree, V_out, "out"
-    elif barrier_type in ("up-and-in", "down-and-in"):
-        # vanilla
+        formula = (
+            "Barrier OUT (discrete steps):\n"
+            "p = (e^{(r−q)Δt} − d)/(u−d)\n"
+            "V_{N,j} = payoff(S_{N,j},K) if alive else 0\n"
+            "V_{i,j} = e^{−rΔt}[ p V_{i+1,j+1} + (1−p)V_{i+1,j} ]"
+        )
+        return price, S_tree, V_out, "out", formula
+    else:
+        # IN via parity
         S_tree = stock_tree(S0, u, d, N)
         V_van = option_tree(S_tree, K, r, q, dt, u, d, option, "european")
-        # out component
         out_type = "up-and-out" if "up" in barrier_type else "down-and-out"
         _, V_out = barrier_out_tree(S0, K, r, q, T, N, u, d, option, out_type, H)
         price = V_van[0][0] - V_out[0][0]
-        return price, S_tree, None, "in"
-    else:
-        raise ValueError("Unknown barrier_type")
+        formula = (
+            "Barrier IN via parity:\n"
+            "Price_IN = Price_vanilla − Price_OUT\n"
+            "(same barrier, same discrete monitoring)"
+        )
+        return price, S_tree, None, "in", formula
 
 
 # ---------- Plotting / export ----------
@@ -243,9 +235,6 @@ def export_frames_to_files(df, csv_path, xlsx_path):
 
 def price_once(S0, K, r, q, T, N, u, d, option, exercise):
     dt = T / N
-    p = risk_neutral_p(r, q, dt, u, d)
-    if p < 0 or p > 1:
-        raise ValueError("Arbitrage check failed (p not in [0,1]).")
     S_tree = stock_tree(S0, u, d, N)
     V_tree = option_tree(S_tree, K, r, q, dt, u, d, option, exercise)
     return V_tree[0][0], S_tree, V_tree
@@ -277,6 +266,7 @@ def greeks(
     p_r_dn, *_ = price_once(S0, K, r - epsr, q, T, N, u, d, option, exercise)
     rho = (p_r_up - p_r_dn) / (2 * epsr)
 
+    # vega via bumping u,d or sigma
     if sigma is not None:
         epsv = 0.01
         u_up, d_up = crr_ud(sigma + epsv, dt)
@@ -289,6 +279,23 @@ def greeks(
     p_v_dn, *_ = price_once(S0, K, r, q, T, N, u_dn, d_dn, option, exercise)
     vega = (p_v_up - p_v_dn) / (2 * (0.01))
 
+    omega = delta * (S0 / price0) if price0 != 0 else float("inf")
+
+    formula = (
+        "Binomial model formulas:\n"
+        f"Δt = T/N = {dt:.6f}\n"
+        "p = (e^{(r−q)Δt} − d)/(u − d)\n"
+        "V_{N,j} = payoff(S_{N,j}, K)\n"
+        "V_{i,j} = e^{−rΔt} [ p V_{i+1,j+1} + (1−p) V_{i+1,j} ]   (European)\n"
+        "V_{i,j} = max( intrinsic , continuation )                (American)\n"
+        "delta ≈ (V(S+ε) − V(S−ε)) / (2ε)\n"
+        "gamma ≈ (V(S+ε) − 2V(S) + V(S−ε)) / ε²\n"
+        "theta ≈ (V(T+ε) − V(T−ε)) / (2ε)\n"
+        "rho   ≈ (V(r+ε) − V(r−ε)) / (2ε)\n"
+        "vega  ≈ (V(σ+ε) − V(σ−ε)) / (2ε)\n"
+        "omega = delta * S0 / Price\n"
+    )
+
     return {
         "price": price0,
         "delta": delta,
@@ -296,6 +303,7 @@ def greeks(
         "theta": theta,
         "vega": vega,
         "rho": rho,
+        "omega": omega,
         "S_tree": S_tree,
         "V_tree": V_tree,
         "u": u,
@@ -303,6 +311,7 @@ def greeks(
         "dt": dt,
         "pu": risk_neutral_p(r, q, dt, u, d),
         "pd": 1 - risk_neutral_p(r, q, dt, u, d),
+        "formula": formula,
     }
 
 
@@ -328,8 +337,6 @@ def enumerate_paths(S0, u, d, N, p):
 def asian_price(S0, K, r, q, T, N, u, d, option, kind="arith"):
     dt = T / N
     p = risk_neutral_p(r, q, dt, u, d)
-    if p < 0 or p > 1:
-        raise ValueError("Arbitrage check failed (p not in [0,1]).")
     exp_payoff = 0.0
     for path, prob in enumerate_paths(S0, u, d, N, p):
         if kind == "arith":
@@ -379,6 +386,17 @@ def asian_greeks(
         2 * (0.01)
     )
     S_tree = stock_tree(S0, u, d, N)
+    omega = delta * (S0 / price0) if price0 != 0 else float("inf")
+    formula = (
+        "Asian option (binomial, discrete):\n"
+        "Path ω: S_0, S_1, ..., S_N (each step: ×u or ×d)\n"
+        "Arithmetic avg: A = (S_0 + ... + S_N)/(N+1)\n"
+        "Geometric  avg: G = (Π S_t)^{1/(N+1)}\n"
+        "payoff = max(A − K, 0) or max(K − A, 0)\n"
+        "Price = e^{−rT} Σ prob(ω) * payoff(ω)\n"
+        "Greeks by bumping S, r, T, σ\n"
+        "omega = delta * S0 / Price"
+    )
     return {
         "price": price0,
         "delta": delta,
@@ -386,17 +404,18 @@ def asian_greeks(
         "theta": theta,
         "vega": vega,
         "rho": rho,
+        "omega": omega,
         "S_tree": S_tree,
         "u": u,
         "d": d,
         "dt": dt,
         "pu": risk_neutral_p(r, q, dt, u, d),
         "pd": 1 - risk_neutral_p(r, q, dt, u, d),
+        "formula": formula,
     }
 
 
 def asian_paths_dataframe(S0, K, r, q, T, N, u, d, option, kind="arith"):
-    """Return all paths with prob, average, and payoff (useful for export)."""
     dt = T / N
     p = risk_neutral_p(r, q, dt, u, d)
     rows = []
@@ -421,7 +440,7 @@ def asian_paths_dataframe(S0, K, r, q, T, N, u, d, option, kind="arith"):
     return pd.DataFrame(rows)
 
 
-# ---------- Black–Scholes (for /bs tab) ----------
+# ---------- Black–Scholes + parity ----------
 
 
 def bs_d1_d2(S0, K, r, q, T, sigma):
@@ -442,6 +461,20 @@ def bs_prices(S0, K, r, q, T, sigma):
     put = disc_r * K * Nmd2 - disc_q * S0 * Nmd1
     delta_c = disc_q * Nd1
     delta_p = disc_q * (Nd1 - 1.0)
+    omega_call = delta_c * (S0 / call) if call != 0 else float("inf")
+    omega_put = delta_p * (S0 / put) if put != 0 else float("inf")
+    formula = (
+        "Black–Scholes (with q):\n"
+        "d1 = [ln(S0/K) + (r − q + 0.5σ²)T]/(σ√T)\n"
+        "d2 = d1 − σ√T\n"
+        "Call = S0 e^{−qT} N(d1) − K e^{−rT} N(d2)\n"
+        "Put  = K e^{−rT} N(−d2) − S0 e^{−qT} N(−d1)\n"
+        "Delta_call = e^{−qT} N(d1)\n"
+        "Delta_put  = e^{−qT}(N(d1) − 1)\n"
+        "Omega_call = Delta_call * S0 / Call\n"
+        "Omega_put  = Delta_put  * S0 / Put\n"
+        "Parity: C − P = S0 e^{−qT} − K e^{−rT}"
+    )
     return {
         "call": call,
         "put": put,
@@ -453,8 +486,11 @@ def bs_prices(S0, K, r, q, T, sigma):
         "N(-d2)": Nmd2,
         "delta_call": delta_c,
         "delta_put": delta_p,
+        "omega_call": omega_call,
+        "omega_put": omega_put,
         "disc_r": disc_r,
         "disc_q": disc_q,
+        "formula": formula,
     }
 
 
