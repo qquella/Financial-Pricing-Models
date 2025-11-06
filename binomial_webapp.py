@@ -31,8 +31,9 @@ app = Flask(__name__)
 
 TEMPLATE = """
 <!doctype html>
-<title>Option Toolkit (Web)</title>
+<title>Option Toolkit</title>
 <h2>Option Toolkit</h2>
+<p>By Quella @2025</p>
 <p>
   <a href="/">Binomial & Exotics</a> |
   <a href="/bs">Black–Scholes Parity</a>
