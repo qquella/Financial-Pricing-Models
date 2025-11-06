@@ -32,7 +32,7 @@ app = Flask(__name__)
 TEMPLATE = """
 <!doctype html>
 <title>Option Toolkit</title>
-<h2>Option Toolkit</h2>
+<h2>Financial Option Models Toolkit</h2>
 <p>By Quella @2025</p>
 <p>
   <a href="/">Binomial & Exotics</a> |
@@ -104,8 +104,9 @@ TEMPLATE = """
 
 TEMPLATE_BS = """
 <!doctype html>
-<title>Option Toolkit (Web) – Black–Scholes Parity</title>
+<title>Financial Option Models Toolkit: Black–Scholes Parity</title>
 <h2>Black–Scholes Put–Call Parity</h2>
+<p>By Quella @2025</p>
 <p>
   <a href="/">Binomial & Exotics</a> |
   <a href="/bs">Black–Scholes Parity</a>
