@@ -85,6 +85,7 @@ TEMPLATE = """
       <label><input type="radio" name="option" value="put" {% if option=='put' %}checked{% endif %}> Put</label>
     Exercise:
       <label><input type="radio" name="exercise" value="european" {% if exercise=='european' %}checked{% endif %}> European</label>
+      <label><input type="radio" name="exercise" value="american" {% if exercise=='american' %}checked{% endif %}> American</label><br><br>
     <button type="submit">Compute</button>
   </fieldset>
 </form>
