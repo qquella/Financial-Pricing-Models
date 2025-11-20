@@ -17,33 +17,31 @@ sys.path.append(os.path.dirname(__file__))
 from binomial_pricer import (
     asian_greeks,
     asian_paths_dataframe,
-    asian_price,
     barrier_price_euro,
     bs_parity_call_from_put,
     bs_parity_put_from_call,
     bs_prices,
     build_frames,
     crr_ud,
+    digital_greeks,
     export_frames_to_files,
     greeks,
     option_tree,
     option_tree_gap,
-    payoff,
     plot_tree_stock_only,
     plot_tree_with_values,
-    price_once,
     risk_neutral_p,
     stock_tree,
 )
 
-APP_TITLE = "Option Toolkit (Binomial + BS Parity)"
+APP_TITLE = "Option Toolkit (Binomial + Exotics + Digitals + BS Parity)"
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1150x760")
+        self.geometry("1200x800")
         nb = ttk.Notebook(self)
         nb.pack(fill=tk.BOTH, expand=True)
 
@@ -115,6 +113,8 @@ class App(tk.Tk):
             ("Asian (Geometric)", "asian_geom"),
             ("Barrier (European)", "barrier"),
             ("Gap (European)", "gap"),
+            ("Binary: Cash-or-Nothing", "binary_cash"),
+            ("Binary: Asset-or-Nothing", "binary_asset"),
         ]:
             ttk.Radiobutton(
                 style,
@@ -165,7 +165,7 @@ class App(tk.Tk):
 
         # Gap controls
         gap = ttk.LabelFrame(left, text="Gap params", padding=8)
-        gap.pack(fill=tk.X, pady=(4, 8))
+        gap.pack(fill=tk.X, pady=(4, 0))
         ttk.Label(gap, text="K_pay").grid(row=0, column=0, sticky="w")
         self.ent_Kpay = ttk.Entry(gap, width=12)
         self.ent_Kpay.insert(0, "100")
@@ -174,6 +174,14 @@ class App(tk.Tk):
         self.ent_Ktrg = ttk.Entry(gap, width=12)
         self.ent_Ktrg.insert(0, "110")
         self.ent_Ktrg.grid(row=1, column=1)
+
+        # Binary controls
+        binf = ttk.LabelFrame(left, text="Binary params", padding=8)
+        binf.pack(fill=tk.X, pady=(4, 8))
+        ttk.Label(binf, text="Cash Q").grid(row=0, column=0, sticky="w")
+        self.ent_Q = ttk.Entry(binf, width=12)
+        self.ent_Q.insert(0, "1.0")
+        self.ent_Q.grid(row=0, column=1)
 
         # Buttons
         btns = ttk.Frame(left)
@@ -195,7 +203,7 @@ class App(tk.Tk):
         )
 
         # Outputs
-        self.results_box = tk.Text(right, height=16, width=100)
+        self.results_box = tk.Text(right, height=20, width=110)
         self.results_box.pack(fill=tk.X)
         fig_frame = ttk.LabelFrame(right, text="Tree", padding=8)
         fig_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
@@ -217,10 +225,14 @@ class App(tk.Tk):
 
     def _payoff_changed(self):
         pf = self.payoff_var.get()
-        if pf in ("asian_arith", "asian_geom"):
-            self.ex_var.set("european")
-            self.rb_am.configure(state="disabled")
-        elif pf in ("barrier", "gap"):
+        if pf in (
+            "asian_arith",
+            "asian_geom",
+            "barrier",
+            "gap",
+            "binary_cash",
+            "binary_asset",
+        ):
             self.ex_var.set("european")
             self.rb_am.configure(state="disabled")
         else:
@@ -250,6 +262,8 @@ class App(tk.Tk):
         self.ent_Kpay.insert(0, "100")
         self.ent_Ktrg.delete(0, tk.END)
         self.ent_Ktrg.insert(0, "110")
+        self.ent_Q.delete(0, tk.END)
+        self.ent_Q.insert(0, "1.0")
         self._set_mode("ud")
         self._payoff_changed()
         self.status.set("Loaded sample values.")
@@ -291,11 +305,12 @@ class App(tk.Tk):
                     f"u={g['u']:.6f}, d={g['d']:.6f}, dt={g['dt']:.6f}, p_u={g['pu']:.6f}, p_d={g['pd']:.6f}"
                 ]
                 txt += [
-                    f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}"
+                    f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}, Omega={g['omega']:.6f}"
                 ]
-                txt += [f"Omega={g['omega']:.6f}  (omega = delta * S0 / price)"]
                 txt += ["", "Formulas used:", g["formula"]]
                 self._render_tree(S_tree, V_tree, N, txt, show_values=True)
+                self._last_df = build_frames(S_tree, V_tree)
+                self._last_mode = "vanilla"
 
             elif style in ("asian_arith", "asian_geom"):
                 kind = "arith" if style == "asian_arith" else "geom"
@@ -306,14 +321,15 @@ class App(tk.Tk):
                 txt = []
                 nm = "Arithmetic" if kind == "arith" else "Geometric"
                 txt += [
-                    f"Asian ({nm}) European {option} (avg includes S0..S_N)",
+                    f"Asian ({nm}) European {option}",
                     f"Price: {g['price']:.6f}",
                     f"u={g['u']:.6f}, d={g['d']:.6f}, dt={g['dt']:.6f}, p_u={g['pu']:.6f}, p_d={g['pd']:.6f}",
-                    f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}",
-                    "(Node option values are path-dependent and omitted from the tree.)",
+                    f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}, Omega={g['omega']:.6f}",
+                    "(Node option values are path-dependent and omitted.)",
+                    "",
+                    "Formulas used:",
+                    g["formula"],
                 ]
-                txt += [f"Omega={g['omega']:.6f}  (omega = delta * S0 / price)"]
-                txt += ["", "Formulas used:", g["formula"]]
                 self._render_tree(S_tree, None, N, txt, show_values=False, asian=True)
                 self._last_df = asian_paths_dataframe(
                     S0, K, r, q, T, N, u, d, option, kind
@@ -330,24 +346,15 @@ class App(tk.Tk):
                     f"Barrier {btype} European {option}",
                     f"H={H}",
                     f"Price: {price:.6f}",
+                    "",
+                    "Formulas used:",
+                    formula,
                 ]
-                txt += ["", "Formulas used:", formula]
                 if kind == "out":
-                    dt = T / N
-                    pu = risk_neutral_p(r, q, dt, u, d)
-                    pd = 1 - pu
-                    txt += [
-                        f"u={u:.6f}, d={d:.6f}, dt={dt:.6f}, p_u={pu:.6f}, p_d={pd:.6f}",
-                        "(Red numbers are option values; knocked-out nodes show 0)",
-                    ]
                     self._render_tree(S_tree, V_tree, N, txt, show_values=True)
                     self._last_df = build_frames(S_tree, V_tree)
                     self._last_mode = "vanilla"
                 else:
-                    txt += [
-                        "(Knock-in price computed via in–out parity: IN = Vanilla − OUT)",
-                        "(Node values are path-dependent and omitted.)",
-                    ]
                     self._render_tree(S_tree, None, N, txt, show_values=False)
                     self._last_df = None
                     self._last_mode = "asian"
@@ -355,6 +362,8 @@ class App(tk.Tk):
             elif style == "gap":
                 K_pay = float(self.ent_Kpay.get())
                 K_trg = float(self.ent_Ktrg.get())
+                from binomial_pricer import option_tree_gap, risk_neutral_p, stock_tree
+
                 S_tree = stock_tree(S0, u, d, N)
                 dt = T / N
                 V_tree = option_tree_gap(S_tree, K_pay, K_trg, r, q, dt, u, d, option)
@@ -365,13 +374,46 @@ class App(tk.Tk):
                     f"K_pay={K_pay}, K_trig={K_trg}",
                     f"Price: {V_tree[0][0]:.6f}",
                     f"u={u:.6f}, d={d:.6f}, dt={dt:.6f}, p_u={pu:.6f}, p_d={pd:.6f}",
-                ]
-                txt += [
                     "",
                     "Formulas used:",
                     "Gap payoff (call): (S_T − K_pay) if S_T > K_trig else 0",
                     "Gap payoff (put):  (K_pay − S_T) if S_T < K_trig else 0",
                     "Then discounted backward in binomial tree like European.",
+                ]
+                self._render_tree(S_tree, V_tree, N, txt, show_values=True)
+                self._last_df = build_frames(S_tree, V_tree)
+                self._last_mode = "vanilla"
+
+            elif style in ("binary_cash", "binary_asset"):
+                kind = "cash" if style == "binary_cash" else "asset"
+                Q = float(self.ent_Q.get())
+                g = digital_greeks(
+                    S0,
+                    K,
+                    r,
+                    q,
+                    T,
+                    N,
+                    u=u,
+                    d=d,
+                    sigma=sigma,
+                    option=option,
+                    kind=kind,
+                    cashQ=Q,
+                )
+                S_tree = g["S_tree"]
+                V_tree = g["V_tree"]
+                nm = "Cash-or-Nothing" if kind == "cash" else "Asset-or-Nothing"
+                extra = f"Q={Q}" if kind == "cash" else ""
+                txt = [
+                    f"Binary {nm} European {option}",
+                    extra,
+                    f"Price: {g['price']:.6f}",
+                    f"u={g['u']:.6f}, d={g['d']:.6f}, dt={g['dt']:.6f}, p_u={g['pu']:.6f}, p_d={g['pd']:.6f}",
+                    f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}, Omega={g['omega']:.6f}",
+                    "",
+                    "Formulas used:",
+                    g["formula"],
                 ]
                 self._render_tree(S_tree, V_tree, N, txt, show_values=True)
                 self._last_df = build_frames(S_tree, V_tree)
@@ -387,7 +429,7 @@ class App(tk.Tk):
 
     def _render_tree(self, S_tree, V_tree, N, lines, show_values=True, asian=False):
         self.results_box.delete("1.0", tk.END)
-        self.results_box.insert("1.0", "\n".join(lines))
+        self.results_box.insert("1.0", "\n".join([l for l in lines if l is not None]))
         self.ax.clear()
         for i, level in enumerate(S_tree[:-1]):
             for j, _ in enumerate(level):
@@ -444,14 +486,9 @@ class App(tk.Tk):
                 return
             csv_path = base
             xlsx_path = base.rsplit(".", 1)[0] + ".xlsx"
-            if self._last_mode == "vanilla":
-                from binomial_pricer import export_frames_to_files
-
-                export_frames_to_files(df, csv_path, xlsx_path)
-            else:
-                df.to_csv(csv_path, index=False)
-                with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-                    df.to_excel(writer, index=False, sheet_name="Paths")
+            df.to_csv(csv_path, index=False)
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Tree")
             self.status.set(f"Saved {csv_path} and {xlsx_path}")
         except Exception as e:
             messagebox.showerror("Export error", str(e))
@@ -513,7 +550,6 @@ class App(tk.Tk):
             d1, d2, Nd1, Nd2 = res["d1"], res["d2"], res["Nd1"], res["Nd2"]
             delta_c, delta_p = res["delta_call"], res["delta_put"]
             disc_r, disc_q = res["disc_r"], res["disc_q"]
-            # Parity method
             call_par = bs_parity_call_from_put(S0, K, r, q, T, put_bs)
             put_par = bs_parity_put_from_call(S0, K, r, q, T, call_bs)
 
@@ -522,6 +558,9 @@ class App(tk.Tk):
             lines.append(f"d1 = {d1:.6f},  d2 = {d2:.6f}")
             lines.append(f"N(d1) = {Nd1:.6f},  N(d2) = {Nd2:.6f}")
             lines.append(f"Delta_call = {delta_c:.6f},  Delta_put = {delta_p:.6f}")
+            lines.append(
+                f"Omega_call = {res['omega_call']:.6f},  Omega_put = {res['omega_put']:.6f}"
+            )
             lines.append(
                 f"disc_r = e^(-rT) = {disc_r:.6f},  disc_q = e^(-qT) = {disc_q:.6f}\n"
             )
@@ -534,7 +573,7 @@ class App(tk.Tk):
                 f"Put  via Parity (using Call) = {put_par:.6f}  -> diff {put_par - put_bs:+.6e}"
             )
             lines.append(
-                f"\nPut–Call Parity should hold: C − P ?= S0 e^(−qT) − K e^(−rT)  -> {call_bs - put_bs:.6f}  vs  {S0*disc_q - K*disc_r:.6f}"
+                f"\nPut–Call Parity: C − P ?= S0 e^(−qT) − K e^(−rT)  -> {call_bs - put_bs:.6f}  vs  {S0*disc_q - K*disc_r:.6f}"
             )
             lines.append("")
             lines.append("Formulas used:")

@@ -1,4 +1,3 @@
-import io
 import itertools
 import math
 
@@ -77,7 +76,7 @@ def option_tree_gap(S_tree, K_pay, K_trig, r, q, dt, u, d, option):
     return V
 
 
-# ---------- Barrier (European) with discrete monitoring ----------
+# ---------- Barrier (European, discrete monitoring) ----------
 
 
 def _ups_to_hit(S0, H, u):
@@ -128,7 +127,6 @@ def barrier_out_tree(S0, K, r, q, T, N, u, d, option, barrier_type, H):
                     V[i][j] = disc * (p * V[i + 1][j + 1] + (1 - p) * V[i + 1][j])
     else:
         raise ValueError("barrier_out_tree only handles up-and-out or down-and-out")
-
     return S, V
 
 
@@ -140,24 +138,19 @@ def barrier_price_euro(S0, K, r, q, T, N, u, d, option, barrier_type, H):
         )
         price = V_out[0][0]
         formula = (
-            "Barrier OUT (discrete steps):\n"
+            "Barrier OUT (discrete):\n"
             "p = (e^{(r−q)Δt} − d)/(u−d)\n"
             "V_{N,j} = payoff(S_{N,j},K) if alive else 0\n"
             "V_{i,j} = e^{−rΔt}[ p V_{i+1,j+1} + (1−p)V_{i+1,j} ]"
         )
         return price, S_tree, V_out, "out", formula
     else:
-        # IN via parity
         S_tree = stock_tree(S0, u, d, N)
         V_van = option_tree(S_tree, K, r, q, dt, u, d, option, "european")
         out_type = "up-and-out" if "up" in barrier_type else "down-and-out"
         _, V_out = barrier_out_tree(S0, K, r, q, T, N, u, d, option, out_type, H)
         price = V_van[0][0] - V_out[0][0]
-        formula = (
-            "Barrier IN via parity:\n"
-            "Price_IN = Price_vanilla − Price_OUT\n"
-            "(same barrier, same discrete monitoring)"
-        )
+        formula = "Barrier IN via parity: Price_IN = Price_vanilla − Price_OUT"
         return price, S_tree, None, "in", formula
 
 
@@ -230,7 +223,7 @@ def export_frames_to_files(df, csv_path, xlsx_path):
     return csv_path, xlsx_path
 
 
-# ---------- Greeks wrappers ----------
+# ---------- Greeks wrappers (vanilla) ----------
 
 
 def price_once(S0, K, r, q, T, N, u, d, option, exercise):
@@ -266,7 +259,6 @@ def greeks(
     p_r_dn, *_ = price_once(S0, K, r - epsr, q, T, N, u, d, option, exercise)
     rho = (p_r_up - p_r_dn) / (2 * epsr)
 
-    # vega via bumping u,d or sigma
     if sigma is not None:
         epsv = 0.01
         u_up, d_up = crr_ud(sigma + epsv, dt)
@@ -388,14 +380,11 @@ def asian_greeks(
     S_tree = stock_tree(S0, u, d, N)
     omega = delta * (S0 / price0) if price0 != 0 else float("inf")
     formula = (
-        "Asian option (binomial, discrete):\n"
-        "Path ω: S_0, S_1, ..., S_N (each step: ×u or ×d)\n"
-        "Arithmetic avg: A = (S_0 + ... + S_N)/(N+1)\n"
-        "Geometric  avg: G = (Π S_t)^{1/(N+1)}\n"
-        "payoff = max(A − K, 0) or max(K − A, 0)\n"
-        "Price = e^{−rT} Σ prob(ω) * payoff(ω)\n"
-        "Greeks by bumping S, r, T, σ\n"
-        "omega = delta * S0 / Price"
+        "Asian option (binomial, discrete paths):\n"
+        "Arithmetic avg A = (S_0 + ... + S_N)/(N+1)\n"
+        "Geometric  avg G = (Π S_t)^{1/(N+1)}\n"
+        "Price = e^{−rT} Σ prob(path) * payoff(avg)\n"
+        "Greeks via finite differences; omega = delta * S0 / Price"
     )
     return {
         "price": price0,
@@ -440,7 +429,124 @@ def asian_paths_dataframe(S0, K, r, q, T, N, u, d, option, kind="arith"):
     return pd.DataFrame(rows)
 
 
-# ---------- Black–Scholes + parity ----------
+# ---------- Binary (digital) options: cash-or-nothing & asset-or-nothing (European) ----------
+
+
+def digital_terminal_payoff(S, K, option, kind="cash", cashQ=1.0):
+    # Threshold convention: ">" for call, "<" for put
+    if kind == "cash":
+        if option == "call":
+            return cashQ if (S > K) else 0.0
+        else:
+            return cashQ if (S < K) else 0.0
+    elif kind == "asset":
+        if option == "call":
+            return S if (S > K) else 0.0
+        else:
+            return S if (S < K) else 0.0
+    else:
+        raise ValueError("kind must be 'cash' or 'asset'")
+
+
+def digital_tree_euro(S0, K, r, q, T, N, u, d, option, kind="cash", cashQ=1.0):
+    dt = T / N
+    S_tree = stock_tree(S0, u, d, N)
+    V = [[0.0] * (i + 1) for i in range(N + 1)]
+    for j, S in enumerate(S_tree[-1]):
+        V[-1][j] = digital_terminal_payoff(S, K, option, kind, cashQ)
+    p = risk_neutral_p(r, q, dt, u, d)
+    if p < 0 or p > 1:
+        raise ValueError("Arbitrage check failed: p not in [0,1].")
+    disc = math.exp(-r * dt)
+    for i in range(N - 1, -1, -1):
+        for j in range(i + 1):
+            V[i][j] = disc * (p * V[i + 1][j + 1] + (1 - p) * V[i + 1][j])
+    price = V[0][0]
+    return price, S_tree, V
+
+
+def digital_greeks(
+    S0, K, r, q, T, N, u=None, d=None, sigma=None, option="call", kind="cash", cashQ=1.0
+):
+    dt = T / N
+    if (u is None or d is None) and sigma is None:
+        raise ValueError("Provide sigma or both u and d for digital_greeks()")
+    if u is None or d is None:
+        u, d = crr_ud(sigma, dt)
+
+    def P(S0_, K_, r_, q_, T_, u_, d_):
+        price, *_ = digital_tree_euro(
+            S0_, K_, r_, q_, T_, N, u_, d_, option, kind, cashQ
+        )
+        return price
+
+    price0, S_tree, V_tree = digital_tree_euro(
+        S0, K, r, q, T, N, u, d, option, kind, cashQ
+    )
+
+    epsS = 0.01 * S0 if S0 != 0 else 0.01
+    delta = (P(S0 + epsS, K, r, q, T, u, d) - P(S0 - epsS, K, r, q, T, u, d)) / (
+        2 * epsS
+    )
+    gamma = (
+        P(S0 + epsS, K, r, q, T, u, d) - 2 * price0 + P(S0 - epsS, K, r, q, T, u, d)
+    ) / (epsS**2)
+
+    h = min(T / 100.0 if T > 0 else 1 / 365.0, 1 / 365.0)
+    theta = (P(S0, K, r, q, T + h, u, d) - P(S0, K, r, q, max(T - h, 1e-6), u, d)) / (
+        2 * h
+    )
+
+    epsr = 1e-4
+    rho = (P(S0, K, r + epsr, q, T, u, d) - P(S0, K, r - epsr, q, T, u, d)) / (2 * epsr)
+
+    if sigma is not None:
+        epsv = 0.01
+        u_up, d_up = crr_ud(sigma + epsv, dt)
+        u_dn, d_dn = crr_ud(max(sigma - epsv, 1e-6), dt)
+    else:
+        lam = 0.01
+        u_up, d_up = u * math.exp(lam), d / math.exp(lam)
+        u_dn, d_dn = u / math.exp(lam), d * math.exp(lam)
+    vega = (P(S0, K, r, q, T, u_up, d_up) - P(S0, K, r, q, T, u_dn, d_dn)) / (
+        2 * (0.01)
+    )
+
+    omega = delta * (S0 / price0) if price0 != 0 else float("inf")
+
+    formula = (
+        "Binary option (European):\n"
+        "Terminal payoff:\n"
+        "  Cash-or-Nothing Call:  Q·1{S_T > K}\n"
+        "  Cash-or-Nothing Put:   Q·1{S_T < K}\n"
+        "  Asset-or-Nothing Call: S_T·1{S_T > K}\n"
+        "  Asset-or-Nothing Put:  S_T·1{S_T < K}\n"
+        "Backward induction (risk-neutral):\n"
+        "  p = (e^{(r−q)Δt} − d)/(u−d),  V_{i,j} = e^{−rΔt}[ pV_{i+1,j+1} + (1−p)V_{i+1,j} ]\n"
+        "Greeks via finite differences; omega = delta * S0 / Price\n"
+        "Threshold convention uses strict > for calls and < for puts."
+    )
+
+    return {
+        "price": price0,
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "rho": rho,
+        "omega": omega,
+        "S_tree": S_tree,
+        "V_tree": V_tree,
+        "u": u,
+        "d": d,
+        "dt": dt,
+        "pu": risk_neutral_p(r, q, dt, u, d),
+        "pd": 1 - risk_neutral_p(r, q, dt, u, d),
+        "formula": formula,
+    }
+
+
+# ---------- Black–Scholes (for /bs tab) ----------
 
 
 def bs_d1_d2(S0, K, r, q, T, sigma):

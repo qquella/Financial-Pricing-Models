@@ -1,6 +1,7 @@
 import base64
 import io
 import math
+import os
 
 import matplotlib
 import pandas as pd
@@ -17,10 +18,10 @@ from binomial_pricer import (
     bs_prices,
     build_frames,
     crr_ud,
+    digital_greeks,
     greeks,
     option_tree,
     option_tree_gap,
-    payoff,
     plot_tree_stock_only,
     plot_tree_with_values,
     risk_neutral_p,
@@ -38,6 +39,7 @@ TEMPLATE = """
   <a href="/">Binomial & Exotics</a> |
   <a href="/bs">Black–Scholes Parity</a>
 </p>
+
 
 <form method="post">
   <fieldset>
@@ -63,6 +65,8 @@ TEMPLATE = """
         <option value="asian_geom" {% if payoff=='asian_geom' %}selected{% endif %}>Asian (Geometric; avg includes S0)</option>
         <option value="barrier" {% if payoff=='barrier' %}selected{% endif %}>Barrier (European)</option>
         <option value="gap" {% if payoff=='gap' %}selected{% endif %}>Gap (European)</option>
+        <option value="binary_cash" {% if payoff=='binary_cash' %}selected{% endif %}>Binary (Cash-or-Nothing)</option>
+        <option value="binary_asset" {% if payoff=='binary_asset' %}selected{% endif %}>Binary (Asset-or-Nothing)</option>
       </select><br><br>
 
     Barrier: type <select name="barrier_type">
@@ -74,12 +78,13 @@ TEMPLATE = """
 
     Gap: K_pay <input name="K_pay" value="{{K_pay}}">, K_trig <input name="K_trig" value="{{K_trig}}"><br><br>
 
+    Binary: Cash Q <input name="Q" value="{{Q}}"><br><br>
+
     Option:
       <label><input type="radio" name="option" value="call" {% if option=='call' %}checked{% endif %}> Call</label>
       <label><input type="radio" name="option" value="put" {% if option=='put' %}checked{% endif %}> Put</label>
     Exercise:
       <label><input type="radio" name="exercise" value="european" {% if exercise=='european' %}checked{% endif %}> European</label>
-      <label><input type="radio" name="exercise" value="american" {% if exercise=='american' %}checked{% endif %}> American</label><br><br>
     <button type="submit">Compute</button>
   </fieldset>
 </form>
@@ -103,7 +108,6 @@ TEMPLATE = """
 """
 
 TEMPLATE_BS = """
-<!doctype html>
 <title>Financial Option Models Toolkit: Black–Scholes Parity</title>
 <h2>Black–Scholes Put–Call Parity</h2>
 <p>By Quella @2025</p>
@@ -135,12 +139,35 @@ TEMPLATE_BS = """
 
 
 def hidden_fields(f):
+    keys = [
+        "S0",
+        "K",
+        "r",
+        "q",
+        "T",
+        "N",
+        "mode",
+        "sigma",
+        "u",
+        "d",
+        "payoff",
+        "barrier_type",
+        "H",
+        "K_pay",
+        "K_trig",
+        "option",
+        "exercise",
+        "Q",
+    ]
     return "\n".join(
-        f'<input type="hidden" name="{k}" value="{v}">' for k, v in f.items()
+        f'<input type="hidden" name="{k}" value="{f.get(k,"")}">' for k in keys
     )
 
 
 def compute_from_form(f):
+    import base64
+    import io
+
     S0 = float(f.get("S0", 100))
     K = float(f.get("K", 100))
     r = float(f.get("r", 0.05))
@@ -161,6 +188,7 @@ def compute_from_form(f):
     btype = f.get("barrier_type", "up-and-out")
     K_pay = float(f.get("K_pay", "100"))
     K_trig = float(f.get("K_trig", "110"))
+    Q = float(f.get("Q", "1.0"))
 
     if mode == "sigma":
         u, d = crr_ud(sigma, T / N)
@@ -178,16 +206,18 @@ def compute_from_form(f):
         )
         buf.seek(0)
         image_b64 = base64.b64encode(buf.read()).decode("ascii")
-        name = f"Vanilla {exercise} {option}"
         result = []
-        result.append(name)
+        result.append(f"Vanilla {exercise} {option}")
         result.append(f"Price: {g['price']:.6f}")
         result.append(
             f"u={g['u']:.6f}, d={g['d']:.6f}, dt={g['dt']:.6f}, p_u={g['pu']:.6f}, p_d={g['pd']:.6f}"
         )
         result.append(
-            f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}"
+            f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}, Omega={g['omega']:.6f}"
         )
+        result.append("")
+        result.append("Formulas used:")
+        result.append(g["formula"])
         return g, df, "\n".join(result), image_b64
 
     elif payoff_style in ("asian_arith", "asian_geom"):
@@ -205,13 +235,16 @@ def compute_from_form(f):
             f"Asian ({nm}) European {option}",
             f"Price: {g['price']:.6f}",
             f"u={g['u']:.6f}, d={g['d']:.6f}, dt={g['dt']:.6f}, p_u={g['pu']:.6f}, p_d={g['pd']:.6f}",
-            f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}",
+            f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}, Omega={g['omega']:.6f}",
             "(Node option values are path-dependent; tree shows S only.)",
+            "",
+            "Formulas used:",
+            g["formula"],
         ]
         return g, df, "\n".join(result), image_b64
 
     elif payoff_style == "barrier":
-        price, S_tree, V_tree, kind = barrier_price_euro(
+        price, S_tree, V_tree, kind, formula = barrier_price_euro(
             S0, K, r, q, T, N, u, d, option, btype, H
         )
         if kind == "out":
@@ -226,10 +259,12 @@ def compute_from_form(f):
                 f"Barrier {btype} European {option}",
                 f"H={H}",
                 f"Price: {price:.6f}",
-                "(Knocked-out nodes show 0).",
+                "",
+                "Formulas used:",
+                formula,
             ]
         else:
-            df = pd.DataFrame()  # nothing useful nodewise
+            df = pd.DataFrame()
             buf = io.BytesIO()
             plot_tree_stock_only(S_tree, f"Stock tree (Barrier knock-in; N={N})", buf)
             buf.seek(0)
@@ -239,10 +274,15 @@ def compute_from_form(f):
                 f"H={H}",
                 f"Price: {price:.6f}",
                 "(Knock-in via parity: IN = Vanilla − OUT). Node values omitted.",
+                "",
+                "Formulas used:",
+                formula,
             ]
         return {"price": price, "S_tree": S_tree}, df, "\n".join(result), image_b64
 
     elif payoff_style == "gap":
+        from binomial_pricer import option_tree_gap, stock_tree
+
         S_tree = stock_tree(S0, u, d, N)
         dt = T / N
         V_tree = option_tree_gap(S_tree, K_pay, K_trig, r, q, dt, u, d, option)
@@ -257,14 +297,42 @@ def compute_from_form(f):
             f"Gap European {option}",
             f"K_pay={K_pay}, K_trig={K_trig}",
             f"Price: {V_tree[0][0]:.6f}",
+            "",
+            "Formulas used:",
+            "Gap payoff; backward induction as European.",
         ]
-        result = result + "\n\nFormulas used:\n" + formula
         return (
             {"price": V_tree[0][0], "S_tree": S_tree},
             df,
             "\n".join(result),
             image_b64,
         )
+
+    elif payoff_style in ("binary_cash", "binary_asset"):
+        kind = "cash" if payoff_style == "binary_cash" else "asset"
+        g = digital_greeks(
+            S0, K, r, q, T, N, u=u, d=d, sigma=sigma, option=option, kind=kind, cashQ=Q
+        )
+        df = build_frames(g["S_tree"], g["V_tree"])
+        buf = io.BytesIO()
+        plot_tree_with_values(
+            g["S_tree"], g["V_tree"], f"Binary {kind} (N={N})", buf, option_color="red"
+        )
+        buf.seek(0)
+        image_b64 = base64.b64encode(buf.read()).decode("ascii")
+        nm = "Cash-or-Nothing" if kind == "cash" else "Asset-or-Nothing"
+        extra = f"Q={Q}" if kind == "cash" else ""
+        result = [
+            f"Binary {nm} European {option}",
+            extra,
+            f"Price: {g['price']:.6f}",
+            f"u={g['u']:.6f}, d={g['d']:.6f}, dt={g['dt']:.6f}, p_u={g['pu']:.6f}, p_d={g['pd']:.6f}",
+            f"Delta={g['delta']:.6f}, Gamma={g['gamma']:.6f}, Theta/yr={g['theta']:.6f}, Vega≈per 1%={g['vega']:.6f}, Rho={g['rho']:.6f}, Omega={g['omega']:.6f}",
+            "",
+            "Formulas used:",
+            g["formula"],
+        ]
+        return g, df, "\n".join(result), image_b64
 
     else:
         raise ValueError("Unknown payoff style")
@@ -290,6 +358,7 @@ def index():
         "barrier_type": "up-and-out",
         "K_pay": "100",
         "K_trig": "110",
+        "Q": "1.0",
     }
     f = defaults.copy()
     if request.method == "POST":
@@ -342,6 +411,9 @@ def bs_page():
         lines.append(f"N(d1) = {Nd1:.6f},  N(d2) = {Nd2:.6f}")
         lines.append(f"Delta_call = {delta_c:.6f},  Delta_put = {delta_p:.6f}")
         lines.append(
+            f"Omega_call = {res['omega_call']:.6f},  Omega_put = {res['omega_put']:.6f}"
+        )
+        lines.append(
             f"disc_r = e^(-rT) = {disc_r:.6f},  disc_q = e^(-qT) = {disc_q:.6f}\n"
         )
         lines.append(f"BS Call (d1,d2) = {call_bs:.6f}")
@@ -355,6 +427,9 @@ def bs_page():
         lines.append(
             f"\nPut–Call Parity: C − P ?= S0 e^(−qT) − K e^(−rT)  -> {call_bs - put_bs:.6f}  vs  {S0*disc_q - K*disc_r:.6f}"
         )
+        lines.append("")
+        lines.append("Formulas used:")
+        lines.append(res["formula"])
         return render_template_string(TEMPLATE_BS, **f, result="\n".join(lines))
     else:
         return render_template_string(TEMPLATE_BS, **f, result=None)
@@ -378,15 +453,7 @@ def dl_xlsx():
     g, df, *_ = compute_from_form(f)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(
-            writer,
-            index=False,
-            sheet_name=(
-                "Tree"
-                if f.get("payoff", "vanilla") in ("vanilla", "barrier", "gap")
-                else "Paths"
-            ),
-        )
+        df.to_excel(writer, index=False, sheet_name="Tree")
     buf.seek(0)
     return send_file(
         buf,
@@ -402,4 +469,5 @@ def favicon():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=False)
